@@ -1,0 +1,24 @@
+# 忽略打包和临时目录
+dist/
+tmp/
+
+# 忽略开发设计文档与打包脚本
+idea.md
+package.sh
+
+# 忽略本地 SQLite 数据库文件（避免上传敏感数据）
+workspace.db
+*.db
+*.sqlite
+*.sqlite3
+
+# 忽略打包生成的 skill 产物
+*.skill
+
+# 忽略 macOS 系统文件
+.DS_Store
+
+# 忽略 Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
