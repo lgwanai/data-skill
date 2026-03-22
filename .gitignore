@@ -6,6 +6,7 @@ outputs/
 # 忽略开发设计文档与打包脚本
 idea.md
 package.sh
+RELEASE_NOTE.md
 
 # 忽略本地 SQLite 数据库文件（避免上传敏感数据）
 workspace.db
