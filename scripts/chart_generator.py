@@ -43,6 +43,7 @@ def generate_echarts_html(df, config, output_path):
     
     bmap_script = ""
     baidu_ak = ""
+    bmap_series_data_str = "[]"
     
     # Handle map chart specifically
     if chart_type == 'map':
@@ -52,9 +53,37 @@ def generate_echarts_html(df, config, output_path):
             <script type="text/javascript" src="https://api.map.baidu.com/api?v=3.0&ak={baidu_ak}"></script>
             <script src="/assets/echarts/bmap.min.js"></script>
             """
-        # ECharts map expects data in {name: '...', value: ...} format
-        map_data = [{"name": str(row[x_col]), "value": float(row[y_col])} for _, row in df.iterrows()]
+        # For BMap, we need to map city names to coordinates. 
+        geo_coord_map = {}
+        geo_coords_file = os.path.join(base_dir, 'references', 'geo_coords.json')
+        if os.path.exists(geo_coords_file):
+            try:
+                with open(geo_coords_file, 'r', encoding='utf-8') as f:
+                    geo_coord_map = json.load(f)
+            except Exception as e:
+                print(f"Warning: Failed to load geo_coords.json: {e}")
+        
+        map_data = [] # fallback data
+        bmap_data = []
+        for _, row in df.iterrows():
+            city_name = str(row[x_col])
+            val = float(row[y_col])
+            map_data.append({"name": city_name, "value": val})
+            
+            # Check if city matches geo_coord exactly, or try to match without '市'
+            coord = geo_coord_map.get(city_name)
+            if not coord and city_name.endswith('市'):
+                coord = geo_coord_map.get(city_name[:-1])
+                
+            if coord:
+                # BMap scatter format: {name: 'City', value: [lng, lat, value]}
+                bmap_data.append({"name": city_name, "value": coord + [val]})
+            else:
+                # If no coord, fallback to just value (might not render on bmap)
+                bmap_data.append({"name": city_name, "value": val})
+                
         series_data_str = json.dumps(map_data, ensure_ascii=False)
+        bmap_series_data_str = json.dumps(bmap_data, ensure_ascii=False)
         x_data_str = "[]" # Not used for map
         y_data_str = "[]" # Not used for map
     else:
@@ -158,15 +187,28 @@ def generate_echarts_html(df, config, output_path):
                 
                 if (hasBmap) {{
                     option.bmap = {{
-                        center: [104.114129, 37.550339], // 中国中心点
+                        center: [116.405285, 39.904989], // 默认中国中心/北京附近
                         zoom: 5,
                         roam: true
                     }};
                     option.series = [{{
                         name: '{config.get("ylabel", y_col)}',
-                        type: 'scatter', // bmap 扩展通常配合 scatter/effectScatter 使用
+                        type: 'effectScatter', 
                         coordinateSystem: 'bmap',
-                        data: {series_data_str}
+                        symbolSize: function (val) {{
+                            // 动态调整散点大小，最大值映射到30
+                            var maxVal = {df[y_col].max() if not df.empty and y_col in df.columns else 100};
+                            return Math.max(10, (val[2] / maxVal) * 30);
+                        }},
+                        itemStyle: {{
+                            color: '#ddb926'
+                        }},
+                        label: {{
+                            formatter: '{{b}}',
+                            position: 'right',
+                            show: {str(config.get("show_labels", True)).lower()}
+                        }},
+                        data: {bmap_series_data_str}
                     }}];
                 }} else {{
                     // 回退到普通 geojson 地图

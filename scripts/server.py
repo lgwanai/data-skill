@@ -5,7 +5,7 @@ import threading
 import http.server
 import socketserver
 import socket
-from urllib.parse import urlparse
+import argparse
 
 def find_free_port(start_port=8000, max_port=8100):
     for port in range(start_port, max_port):
@@ -19,7 +19,8 @@ def find_free_port(start_port=8000, max_port=8100):
 
 def get_server_info_file():
     """Get the path to the server info file."""
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tmp', '.server_info')
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_dir, 'tmp', '.server_info')
 
 def check_server_running():
     """Check if the server is already running."""
@@ -50,40 +51,32 @@ def check_server_running():
 class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         super().end_headers()
         
     def log_message(self, format, *args):
         # Suppress logging to keep console clean
         pass
 
-def start_server_in_background(base_dir):
-    """Start the HTTP server in a background thread."""
-    # Ensure tmp directory exists
-    os.makedirs(os.path.join(base_dir, 'tmp'), exist_ok=True)
-    
-    port = check_server_running()
-    if port:
-        return port
-        
-    port = find_free_port()
-    
+def run_server_forever(port, base_dir):
+    """Run the server synchronously."""
+    os.chdir(base_dir)
     # Save server info
+    os.makedirs(os.path.join(base_dir, 'tmp'), exist_ok=True)
     with open(get_server_info_file(), 'w') as f:
         json.dump({'port': port}, f)
         
-    def run_server():
-        os.chdir(base_dir) # Server from root to access both tmp/ and assets/
-        handler = CustomHTTPRequestHandler
-        with socketserver.TCPServer(("", port), handler) as httpd:
+    handler = CustomHTTPRequestHandler
+    with socketserver.TCPServer(("", port), handler) as httpd:
+        try:
             httpd.serve_forever()
-            
-    # Start thread as daemon so it exits when main process exits
-    # But since we want it to persist, we actually just fork it in a real scenario
-    # For now, we'll start it as a daemon thread in the current process
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    
-    return port
+        except KeyboardInterrupt:
+            pass
+        finally:
+            try:
+                os.remove(get_server_info_file())
+            except:
+                pass
 
 def ensure_server_running():
     """
@@ -94,49 +87,37 @@ def ensure_server_running():
     port = check_server_running()
     
     if not port:
-        # We need to spawn a background process so it survives this script's termination
         import subprocess
-        
-        # Create a simple server script
-        server_script = os.path.join(base_dir, 'tmp', '_run_server.py')
-        os.makedirs(os.path.join(base_dir, 'tmp'), exist_ok=True)
-        
         port = find_free_port()
         
-        with open(server_script, 'w') as f:
-            f.write(f"""
-import http.server
-import socketserver
-import os
-import json
-
-os.chdir('{base_dir}')
-PORT = {port}
-
-with open('tmp/.server_info', 'w') as f:
-    json.dump({{'port': PORT}}, f)
-
-Handler = http.server.SimpleHTTPRequestHandler
-with socketserver.TCPServer(("", PORT), Handler) as httpd:
-    httpd.serve_forever()
-""")
+        # Start this very script as a background process using the --daemon flag
+        cmd = [sys.executable, os.path.abspath(__file__), "--daemon", "--port", str(port)]
         
-        # Start detached process
         if sys.platform == 'win32':
-            subprocess.Popen([sys.executable, server_script], 
+            subprocess.Popen(cmd, 
                              creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            subprocess.Popen([sys.executable, server_script], 
+            subprocess.Popen(cmd, 
                              start_new_session=True,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                              
-        # Wait a moment for it to start
+        # Wait a moment for it to start and write the info file
         import time
         time.sleep(0.5)
         
     return f"http://127.0.0.1:{port}"
 
 if __name__ == "__main__":
-    url = ensure_server_running()
-    print(f"Server is running at {url}")
+    parser = argparse.ArgumentParser(description="Data Skill local HTTP server")
+    parser.add_argument("--daemon", action="store_true", help="Run as daemon")
+    parser.add_argument("--port", type=int, help="Port to run on")
+    
+    args = parser.parse_args()
+    
+    if args.daemon and args.port:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        run_server_forever(args.port, base_dir)
+    else:
+        url = ensure_server_running()
+        print(f"Server is running at {url}")
