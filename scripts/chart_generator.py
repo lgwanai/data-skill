@@ -4,6 +4,9 @@ import pandas as pd
 import json
 import os
 import io
+import urllib.request
+import urllib.parse
+import copy
 
 from server import ensure_server_running
 
@@ -29,201 +32,106 @@ def get_baidu_ak():
     print("="*60 + "\n")
     return None
 
-def generate_echarts_html(df, config, output_path):
-    """Generate an interactive HTML file using ECharts."""
-    chart_type = config.get("chart_type", "bar").lower()
-    x_col = config.get("x_col")
-    y_col = config.get("y_col")
-    title = config.get("title", f"{chart_type.capitalize()} Chart")
-    
+def get_geo_coord(address, ak):
+    """Dynamically geocode address using Baidu API and cache the result."""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cache_file = os.path.join(base_dir, 'references', 'geo_cache.json')
+    cache = {}
     
-    # Ensure data is JSON serializable
-    x_data = df[x_col].tolist() if x_col in df.columns else []
-    
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+        except Exception:
+            pass
+            
+    if address in cache:
+        return cache[address]
+        
+    url = f"https://api.map.baidu.com/geocoding/v3/?address={urllib.parse.quote(address)}&output=json&ak={ak}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as response:
+            res = json.loads(response.read().decode('utf-8'))
+            if res.get('status') == 0 and 'result' in res and 'location' in res['result']:
+                location = res['result']['location']
+                coord = [location['lng'], location['lat']]
+                cache[address] = coord
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(cache, f, ensure_ascii=False, indent=4)
+                return coord
+    except Exception as e:
+        print(f"Geocoding failed for {address}: {e}")
+        
+    return None
+
+def replace_placeholders(obj, replacements):
+    """Recursively replace placeholders like {title} in the option dictionary."""
+    if isinstance(obj, dict):
+        return {k: replace_placeholders(v, replacements) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [replace_placeholders(i, replacements) for i in obj]
+    elif isinstance(obj, str):
+        for k, v in replacements.items():
+            if obj == f"{{{k}}}":
+                return v
+        for k, v in replacements.items():
+            obj = obj.replace(f"{{{k}}}", str(v))
+        return obj
+    return obj
+
+def generate_echarts_html(df, config, output_path):
+    """Generate an interactive HTML file using ECharts configuration directly."""
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    baidu_ak = get_baidu_ak()
     bmap_script = ""
-    baidu_ak = ""
-    bmap_series_data_str = "[]"
     
-    # Handle map chart specifically
-    if chart_type == 'map':
-        baidu_ak = get_baidu_ak()
-        if baidu_ak:
-            bmap_script = f"""
-            <script type="text/javascript" src="https://api.map.baidu.com/api?v=3.0&ak={baidu_ak}"></script>
-            <script src="/assets/echarts/bmap.min.js"></script>
-            """
-        # For BMap, we need to map city names to coordinates. 
-        geo_coord_map = {}
-        geo_coords_file = os.path.join(base_dir, 'references', 'geo_coords.json')
-        if os.path.exists(geo_coords_file):
-            try:
-                with open(geo_coords_file, 'r', encoding='utf-8') as f:
-                    geo_coord_map = json.load(f)
-            except Exception as e:
-                print(f"Warning: Failed to load geo_coords.json: {e}")
-        
-        map_data = [] # fallback data
-        bmap_data = []
-        for _, row in df.iterrows():
-            city_name = str(row[x_col])
-            val = float(row[y_col])
-            map_data.append({"name": city_name, "value": val})
-            
-            # Check if city matches geo_coord exactly, or try to match without '市'
-            coord = geo_coord_map.get(city_name)
-            if not coord and city_name.endswith('市'):
-                coord = geo_coord_map.get(city_name[:-1])
-                
-            if coord:
-                # BMap scatter format: {name: 'City', value: [lng, lat, value]}
-                bmap_data.append({"name": city_name, "value": coord + [val]})
-            else:
-                # If no coord, fallback to just value (might not render on bmap)
-                bmap_data.append({"name": city_name, "value": val})
-                
-        series_data_str = json.dumps(map_data, ensure_ascii=False)
-        bmap_series_data_str = json.dumps(bmap_data, ensure_ascii=False)
-        x_data_str = "[]" # Not used for map
-        y_data_str = "[]" # Not used for map
-    else:
-        y_data = [float(v) if pd.notnull(v) else 0 for v in df[y_col].tolist()] if y_col in df.columns else []
-        x_data_str = json.dumps([str(x) for x in x_data], ensure_ascii=False)
-        y_data_str = json.dumps(y_data, ensure_ascii=False)
-        series_data_str = "[]"
-        
-        # Prepare pie data if needed
-        if chart_type == 'pie':
-            pie_data = [{"name": str(x), "value": y} for x, y in zip(x_data, y_data)]
-            series_data_str = json.dumps(pie_data, ensure_ascii=False)
-            
-    # ECharts configuration template
+    title = config.get("title", "Chart")
+    custom_js = config.get("custom_js", "")
+    option = config.get("echarts_option", {})
+    
+    # 1. Automatic Dataset Injection (if not already provided by custom option)
+    if not option.get('dataset') and not df.empty:
+        # Check if custom_js relies heavily on rawData, if so we provide it
+        dataset_source = [df.columns.tolist()] + df.values.tolist()
+        option['dataset'] = {'source': dataset_source}
+    
+    raw_data_json = json.dumps(df.to_dict(orient='records'), ensure_ascii=False)
+    # Expose rawData and datasetSource to JS scope for complex scripts
+    dataset_source_json = json.dumps([df.columns.tolist()] + df.values.tolist(), ensure_ascii=False)
+    custom_js = f"var rawData = {raw_data_json};\nvar datasetSource = {dataset_source_json};\n" + custom_js
+
+    # 2. BMap script injection check
+    if ("bmap" in json.dumps(option) or "bmap" in custom_js) and baidu_ak:
+        bmap_script = f"""
+        <script type="text/javascript" src="https://api.map.baidu.com/api?v=3.0&ak={baidu_ak}"></script>
+        <script src="/assets/echarts/bmap.min.js"></script>
+        """
+    option_json = json.dumps(option, ensure_ascii=False)
+    
+    # 自动检测是否使用了 'china' 地图并注入 china.js
+    china_map_script = ""
+    if "china" in option_json or "china" in custom_js:
+        china_map_script = '<script src="/assets/echarts/china.js"></script>'
+    
     html_template = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <meta charset="utf-8">
         <title>{title}</title>
-        <!-- 使用本地离线 ECharts -->
         <script src="/assets/echarts/echarts.min.js"></script>
         {bmap_script}
-        <!-- 如果是地图，引入相应的地图数据 china.js -->
-        {"<script src='/assets/echarts/china.js'></script>" if chart_type == 'map' else ""}
+        {china_map_script}
     </head>
     <body>
         <div id="main" style="width: 100%; height: 800px;"></div>
         <script type="text/javascript">
             var myChart = echarts.init(document.getElementById('main'));
-            var chartType = '{chart_type}';
+            var option = {option_json};
             
-            var option = {{
-                title: {{
-                    text: '{title}',
-                    left: 'center'
-                }},
-                tooltip: {{
-                    trigger: chartType === 'pie' || chartType === 'map' ? 'item' : 'axis'
-                }},
-                legend: {{
-                    orient: 'vertical',
-                    left: 'left',
-                    top: 'bottom'
-                }},
-                toolbox: {{
-                    show: true,
-                    feature: {{
-                        saveAsImage: {{ show: true }}
-                    }}
-                }}
-            }};
-            
-            if (chartType === 'bar' || chartType === 'line' || chartType === 'scatter') {{
-                option.xAxis = {{
-                    type: chartType === 'scatter' ? 'value' : 'category',
-                    name: '{config.get("xlabel", "")}',
-                    data: {x_data_str}
-                }};
-                option.yAxis = {{
-                    type: 'value',
-                    name: '{config.get("ylabel", "")}'
-                }};
-                option.series = [{{
-                    data: {y_data_str},
-                    type: chartType,
-                    label: {{
-                        show: {str(config.get("show_labels", True)).lower()},
-                        position: 'top'
-                    }}
-                }}];
-            }} else if (chartType === 'pie') {{
-                option.series = [{{
-                    type: 'pie',
-                    radius: '50%',
-                    data: {series_data_str},
-                    emphasis: {{
-                        itemStyle: {{
-                            shadowBlur: 10,
-                            shadowOffsetX: 0,
-                            shadowColor: 'rgba(0, 0, 0, 0.5)'
-                        }}
-                    }},
-                    label: {{
-                        show: {str(config.get("show_labels", True)).lower()},
-                        formatter: '{{b}}: {{c}} ({{d}}%)'
-                    }}
-                }}];
-            }} else if (chartType === 'map') {{
-                option.visualMap = {{
-                    min: 0,
-                    max: {df[y_col].max() if not df.empty and y_col in df.columns else 100},
-                    left: 'left',
-                    top: 'bottom',
-                    text: ['高','低'],
-                    calculable: true
-                }};
-                
-                // 判断是否配置了百度地图AK
-                var hasBmap = {str(bool(baidu_ak)).lower()};
-                
-                if (hasBmap) {{
-                    option.bmap = {{
-                        center: [116.405285, 39.904989], // 默认中国中心/北京附近
-                        zoom: 5,
-                        roam: true
-                    }};
-                    option.series = [{{
-                        name: '{config.get("ylabel", y_col)}',
-                        type: 'effectScatter', 
-                        coordinateSystem: 'bmap',
-                        symbolSize: function (val) {{
-                            // 动态调整散点大小，最大值映射到30
-                            var maxVal = {df[y_col].max() if not df.empty and y_col in df.columns else 100};
-                            return Math.max(10, (val[2] / maxVal) * 30);
-                        }},
-                        itemStyle: {{
-                            color: '#ddb926'
-                        }},
-                        label: {{
-                            formatter: '{{b}}',
-                            position: 'right',
-                            show: {str(config.get("show_labels", True)).lower()}
-                        }},
-                        data: {bmap_series_data_str}
-                    }}];
-                }} else {{
-                    // 回退到普通 geojson 地图
-                    option.series = [{{
-                        name: '{config.get("ylabel", y_col)}',
-                        type: 'map',
-                        mapType: 'china',
-                        roam: true,
-                        label: {{
-                            show: {str(config.get("show_labels", True)).lower()}
-                        }},
-                        data: {series_data_str}
-                    }}];
-                }}
-            }}
+            {custom_js}
             
             myChart.setOption(option);
             window.addEventListener('resize', function() {{
@@ -238,13 +146,8 @@ def generate_echarts_html(df, config, output_path):
     with io.open(output_path, 'w', encoding='utf-8') as f:
         f.write(html_template)
     
-    # 启动或获取本地服务
     base_url = ensure_server_running()
-    
-    # 计算相对路径，生成访问链接
-    rel_path = os.path.relpath(output_path, base_dir)
-    # Ensure forward slashes for URLs
-    rel_path = rel_path.replace(os.sep, '/')
+    rel_path = os.path.relpath(output_path, base_dir).replace(os.sep, '/')
     access_url = f"{base_url}/{rel_path}"
     
     print(f"✅ 交互式 ECharts 图表已生成！")
@@ -284,7 +187,9 @@ def generate_chart(config):
         
     print(f"Data fetched successfully: {len(df)} rows.")
     
-    output_path = config.get("output_path", "tmp/output_chart.html")
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    default_output = os.path.join(base_dir, "outputs", "html", "chart.html")
+    output_path = config.get("output_path", default_output)
     if not output_path.endswith('.html'):
         output_path = os.path.splitext(output_path)[0] + '.html'
         

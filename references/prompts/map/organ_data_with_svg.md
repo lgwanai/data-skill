@@ -1,0 +1,86 @@
+## 图表类型：内脏数据（SVG） (Organ Data with SVG)
+
+**生成指令**：你现在的任务是生成一个 ECharts 的 `option` 配置。请根据以下骨架代码和数据结构要求，结合用户的实际数据进行填充和修改，生成一份完整的图表配置参数。
+
+### 图片资源提示
+该图表需要加载以下类型的图片资源：
+https://echarts.apache.org/examples/data/asset/geo/Veins_Medical_Diagram_clip_art.svg
+请在生成代码时保留图片 URL 参数位置，并在最终输出时明确提示用户提供相应的图片资源 URL。
+
+### ECharts Option 骨架参考
+请基于此结构（已剥离冗长写死的数据）生成配置。不要直接输出此骨架，而是要输出**包含真实数据和完整逻辑**的完整 `option` 对象：
+
+```javascript
+$.get(
+  ROOT_PATH + '/data/asset/geo/Veins_Medical_Diagram_clip_art.svg',
+  function (svg) {
+    echarts.registerMap('organ_diagram', { svg: svg });
+    option = {
+      tooltip: {},
+      geo: {
+        left: 10,
+        right: '50%',
+        map: 'organ_diagram',
+        selectedMode: 'multiple',
+        emphasis: {
+          focus: 'self',
+          itemStyle: {
+            color: null
+          },
+          label: {
+            position: 'bottom',
+            distance: 0,
+            textBorderColor: '#fff',
+            textBorderWidth: 2
+          }
+        },
+        blur: {},
+        select: {
+          itemStyle: {
+            color: '#b50205'
+          },
+          label: {
+            show: false,
+            textBorderColor: '#fff',
+            textBorderWidth: 2
+          }
+        }
+      },
+      grid: {
+        left: '60%',
+        top: '20%',
+        bottom: '20%'
+      },
+      xAxis: {},
+      yAxis: {
+        data: [ /* 请使用用户的真实数据数组替换此处 */ ]
+      },
+      series: [
+        {
+          type: 'bar',
+          emphasis: {
+            focus: 'self'
+          },
+          data: [ /* 请使用用户的真实数据数组替换此处 */ ]
+        }
+      ]
+    };
+    myChart.setOption(option);
+    myChart.on('mouseover', { seriesIndex: 0 }, function (event) {
+      myChart.dispatchAction({
+        type: 'highlight',
+        geoIndex: 0,
+        name: event.name
+      });
+    });
+    myChart.on('mouseout', { seriesIndex: 0 }, function (event) {
+      myChart.dispatchAction({
+        type: 'downplay',
+        geoIndex: 0,
+        name: event.name
+      });
+    });
+  }
+);
+```
+

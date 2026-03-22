@@ -18,9 +18,9 @@ This skill transforms the agent into a powerful local data analysis assistant, s
 ## Scenarios & Procedures
 
 ### Scenario 1: Data Import & Auto-Cleaning
-**Trigger**: User uploads or specifies a CSV/Excel file.
+**Trigger**: User uploads or specifies a CSV/Excel/WPS(.et)/Numbers file.
 **Action**:
-1. Run the built-in importer script:
+1. Run the built-in importer script (supports `.csv`, `.xlsx`, `.xls`, `.et`, `.numbers`):
    ```bash
    python scripts/data_importer.py "path/to/file.xlsx" --db workspace.db
    ```
@@ -47,32 +47,30 @@ This skill transforms the agent into a powerful local data analysis assistant, s
 3. For Semantic extraction, use regex or heuristic rules in Python. If LLM analysis is strictly required, write a script that processes the column locally or prompts the user for permission to send a sample.
 
 ### Scenario 4: Chart Generation
-**Trigger**: User requests a visualization (bar, pie, line, scatter, map).
+**Trigger**: User requests a visualization (bar, pie, line, scatter, map, funnel, 3D charts, etc.).
 **Action**:
 1. Do NOT write custom Python scripts from scratch.
-2. Use the built-in universal `scripts/chart_generator.py` script.
-3. Formulate the SQL query that aggregates the data correctly (ensure it outputs the exact columns needed for the chart).
-4. Construct a JSON configuration string matching this template:
+2. We have a powerful template-based rendering engine. Use the built-in `scripts/chart_generator.py` script.
+3. First, identify the required chart type. Look into `references/prompts/` directory to find the corresponding Prompt skeleton for the exact chart type (e.g., `references/prompts/line/stacked_area.md`). Read the prompt to understand the data structure requirements.
+4. Formulate the SQL query that aggregates the data correctly according to the prompt's requirements.
+5. Generate the `custom_js` and `echarts_option` based on the prompt template.
+6. Construct a JSON configuration file (save it in `outputs/configs/`) matching this structure:
    ```json
    {
        "db_path": "workspace.db",
        "query": "SELECT category, SUM(value) as val FROM table GROUP BY category",
-       "chart_type": "bar", // Can be "bar", "pie", "line", "scatter", "map"
-       "x_col": "category",
-       "y_col": "val",
        "title": "Chart Title",
-       "xlabel": "X Axis Label",
-       "ylabel": "Y Axis Label",
-       "output_path": "tmp/output_chart.html", // Must be .html
-       "show_labels": true
+       "output_path": "/Users/wuliang/workspace/data-skill/outputs/html/output_chart.html",
+       "echarts_option": { ... }, // Generated option from prompt
+       "custom_js": "..." // Optional JS logic for complex data binding
    }
    ```
-   *Note: If the user requests a map chart (`"chart_type": "map"`), it will utilize the local ECharts and `bmap` extension. The script will check `config.txt` for `BAIDU_AK`. If not found, it will warn the user but fallback to a standard geojson map.*
-5. Execute the command:
+   *Note: For map charts requiring coordinates, use the built-in Geocoding capabilities or ECharts native `geo` coordinate systems. Output files MUST be stored in the isolated `outputs/html/` directory.*
+7. Execute the command:
    ```bash
-   python scripts/chart_generator.py --config '{"db_path": "workspace.db", "query": "...", ...}'
+   python scripts/chart_generator.py --config outputs/configs/your_config.json
    ```
-6. The script will automatically start a local HTTP server and return an access URL. Provide this URL to the user to view the interactive chart.
+8. The script will automatically start a local HTTP server and return an access URL. Provide this URL to the user to view the interactive chart.
 
 ### Scenario 5: File Merging & Splitting
 **Trigger**: User needs to combine multiple identical reports or split a master sheet by department.
@@ -83,13 +81,13 @@ This skill transforms the agent into a powerful local data analysis assistant, s
 ### Scenario 6: Export & Reporting
 **Trigger**: User wants to download the final result or generate a summary report.
 **Action**:
-1. **Export Excel**: Generate a Python script to dump the current SQLite table to `.xlsx`:
-   ```python
-   import sqlite3
-   import pandas as pd
-   conn = sqlite3.connect('workspace.db')
-   df = pd.read_sql_query("SELECT * FROM final_table", conn)
-   df.to_excel('final_output.xlsx', index=False)
+1. **Export CSV/Excel**: Use the built-in exporter script to dump a table or query result to `.csv` or `.xlsx`:
+   ```bash
+   # Export an entire table
+   python scripts/data_exporter.py "outputs/final_result.csv" --table "final_table"
+   
+   # Export a specific query
+   python scripts/data_exporter.py "outputs/final_result.xlsx" --query "SELECT category, SUM(value) FROM sales GROUP BY category"
    ```
 2. **Report Generation**: Write a Markdown file summarizing the analysis steps, key metrics (retrieved via SQL), and referencing any generated charts. Provide the user with the path to the report.
 
@@ -100,3 +98,13 @@ This skill transforms the agent into a powerful local data analysis assistant, s
    ```bash
    python scripts/data_cleaner.py --db workspace.db --days 30
    ```
+
+### Scenario 8: Metrics Management
+**Trigger**: User describes or defines a specific metric calculation logic or business definition (口径).
+**Action**:
+1. When the user provides a metric definition, save it to the local markdown file `references/metrics.md` to build up context for future SQL generation.
+2. Use the built-in script `scripts/metrics_manager.py` to append the metric:
+   ```bash
+   python scripts/metrics_manager.py --name "Metric Name" --desc "Metric calculation logic or business description"
+   ```
+3. When generating SQL queries later, ALWAYS read `references/metrics.md` to ensure the generated SQL aligns with the saved business definitions.

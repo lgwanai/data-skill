@@ -32,23 +32,26 @@ def init_meta_table(conn):
     ''')
     conn.commit()
 
-def check_duplicate_import(conn, file_name, md5_hash):
-    """Check if the file has already been imported with the same MD5."""
+def check_duplicate_import(conn, md5_hash):
+    """Check if the file has already been imported with the same MD5. Returns a list of table names."""
     cursor = conn.cursor()
     cursor.execute('''
         SELECT table_name FROM _data_skill_meta 
-        WHERE file_name = ? AND md5_hash = ?
-    ''', (file_name, md5_hash))
-    result = cursor.fetchone()
-    if result:
+        WHERE md5_hash = ?
+    ''', (md5_hash,))
+    results = cursor.fetchall()
+    if results:
+        tables = [r[0] for r in results]
         # Update last_used_time since we accessed it
-        cursor.execute('''
-            UPDATE _data_skill_meta 
-            SET last_used_time = ? 
-            WHERE table_name = ?
-        ''', (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), result[0]))
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for t in tables:
+            cursor.execute('''
+                UPDATE _data_skill_meta 
+                SET last_used_time = ? 
+                WHERE table_name = ?
+            ''', (now, t))
         conn.commit()
-        return result[0]
+        return tables
     return None
 
 def record_import(conn, file_name, table_name, md5_hash):
@@ -104,14 +107,17 @@ def find_header_row(df, max_rows=10):
             
     return best_row_idx
 
-def unmerge_and_fill_excel(file_path):
+def unmerge_and_fill_excel(file_path, sheet_name=None):
     """
     Reads an Excel file, unmerges any merged cells, and fills them with the top-left value.
     Returns a pandas DataFrame.
     """
     import openpyxl
     wb = openpyxl.load_workbook(file_path, data_only=False)
-    sheet = wb.active
+    if sheet_name and sheet_name in wb.sheetnames:
+        sheet = wb[sheet_name]
+    else:
+        sheet = wb.active
     
     # Extract merged cells ranges
     merged_ranges = list(sheet.merged_cells.ranges)
@@ -157,88 +163,149 @@ def import_to_sqlite(file_path, db_path, table_name=None):
     file_name = os.path.basename(file_path)
     
     # Check for duplicate import
-    existing_table = check_duplicate_import(conn, file_name, file_md5)
-    if existing_table:
-        print(f"File '{file_name}' with identical content already imported as table '{existing_table}'. Skipping import.")
+    existing_tables = check_duplicate_import(conn, file_md5)
+    if existing_tables:
+        print(f"File '{file_name}' with identical content already imported as tables: {', '.join(existing_tables)}. Skipping import.")
         conn.close()
-        return existing_table
+        return existing_tables
 
     cursor = conn.cursor()
     
-    # Handle existing table by appending suffix
-    original_table_name = table_name
-    counter = 1
-    while True:
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
-        if not cursor.fetchone():
-            break
-        table_name = f"{original_table_name}_v{counter}"
-        counter += 1
-        
-    print(f"Importing {file_path} to table '{table_name}' in {db_path}...")
+    def get_unique_table_name(base_name):
+        t_name = base_name
+        counter = 1
+        while True:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (t_name,))
+            if not cursor.fetchone():
+                return t_name
+            t_name = f"{base_name}_v{counter}"
+            counter += 1
+
+    imported_tables = []
     
     if ext == '.csv':
-        # For CSV, use chunking for large files
+        target_table = get_unique_table_name(table_name)
+        print(f"Importing {file_path} to table '{target_table}' in {db_path}...")
+        
         chunk_size = 50000
         first_chunk = True
-        
-        # Read a small sample to find the header
         sample_df = pd.read_csv(file_path, nrows=20, header=None)
         header_idx = find_header_row(sample_df)
         
         for chunk in pd.read_csv(file_path, skiprows=header_idx, chunksize=chunk_size):
             if first_chunk:
                 chunk.columns = clean_column_names(chunk.columns)
-                # Store columns for subsequent chunks
                 final_cols = chunk.columns
-                chunk.to_sql(table_name, conn, index=False, if_exists='replace')
+                chunk.to_sql(target_table, conn, index=False, if_exists='replace')
                 first_chunk = False
             else:
                 chunk.columns = final_cols
-                chunk.to_sql(table_name, conn, index=False, if_exists='append')
+                chunk.to_sql(target_table, conn, index=False, if_exists='append')
                 
         print(f"CSV import completed successfully.")
+        record_import(conn, file_name, target_table, file_md5)
+        imported_tables.append(target_table)
         
-    elif ext in ['.xlsx', '.xls']:
+    elif ext in ['.xlsx', '.xls', '.et']:
         try:
-            # Try to handle merged cells first
-            print("Processing Excel file (handling merged cells)...")
-            df = unmerge_and_fill_excel(file_path)
+            xl = pd.ExcelFile(file_path)
+            sheet_names = xl.sheet_names
+        except Exception:
+            sheet_names = [0]
             
-            # Find real header
+        for sheet_name in sheet_names:
+            if len(sheet_names) > 1:
+                safe_sheet_name = str(sheet_name).strip()
+                safe_sheet_name = re.sub(r'\W+', '_', safe_sheet_name).strip('_')
+                base_sheet_table = f"{table_name}_{safe_sheet_name}"
+            else:
+                base_sheet_table = table_name
+                
+            target_table = get_unique_table_name(base_sheet_table)
+            print(f"Processing Excel sheet '{sheet_name}' to table '{target_table}'...")
+            
+            try:
+                if ext == '.et':
+                    raise ValueError("Skip unmerge for .et, fallback to pandas directly")
+                df = unmerge_and_fill_excel(file_path, sheet_name=sheet_name if isinstance(sheet_name, str) else None)
+                header_idx = find_header_row(df)
+                if header_idx > 0:
+                    new_header = df.iloc[header_idx]
+                    df = df[header_idx+1:]
+                    df.columns = new_header
+            except Exception as e:
+                print(f"Fallback to standard pandas read due to: {e}")
+                sample_df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=20, header=None)
+                header_idx = find_header_row(sample_df)
+                df = pd.read_excel(file_path, sheet_name=sheet_name, skiprows=header_idx)
+                
+            df.dropna(how='all', inplace=True)
+            df.dropna(axis=1, how='all', inplace=True)
+            df.columns = clean_column_names(df.columns)
+            df.to_sql(target_table, conn, index=False, if_exists='replace')
+            print(f"Sheet '{sheet_name}' import completed. Loaded {len(df)} rows.")
+            
+            sheet_file_name = f"{file_name}::{sheet_name}" if len(sheet_names) > 1 else file_name
+            record_import(conn, sheet_file_name, target_table, file_md5)
+            imported_tables.append(target_table)
+            
+    elif ext == '.numbers':
+        try:
+            from numbers_parser import Document
+        except ImportError:
+            raise ImportError("Please install 'numbers-parser' package to read .numbers files: pip install numbers-parser")
+            
+        print("Processing Mac Numbers file...")
+        doc = Document(file_path)
+        sheets = doc.sheets
+        if not sheets:
+            raise ValueError("No sheets found in the .numbers file.")
+        
+        for sheet in sheets:
+            sheet_name = sheet.name
+            if len(sheets) > 1:
+                safe_sheet_name = str(sheet_name).strip()
+                safe_sheet_name = re.sub(r'\W+', '_', safe_sheet_name).strip('_')
+                base_sheet_table = f"{table_name}_{safe_sheet_name}"
+            else:
+                base_sheet_table = table_name
+                
+            target_table = get_unique_table_name(base_sheet_table)
+            print(f"Processing Numbers sheet '{sheet_name}' to table '{target_table}'...")
+            
+            tables = sheet.tables
+            if not tables:
+                print(f"No tables found in sheet '{sheet_name}', skipping.")
+                continue
+                
+            data = tables[0].rows(values_only=True)
+            df = pd.DataFrame(data)
+            
+            df.dropna(how='all', inplace=True)
+            df.dropna(axis=1, how='all', inplace=True)
+            
             header_idx = find_header_row(df)
             if header_idx > 0:
-                # Set the real header
                 new_header = df.iloc[header_idx]
                 df = df[header_idx+1:]
                 df.columns = new_header
+            elif len(df) > 0:
+                df.columns = df.iloc[0]
+                df = df[1:]
                 
-        except Exception as e:
-            print(f"Fallback to standard pandas read due to: {e}")
-            # Fallback to standard pandas read
-            sample_df = pd.read_excel(file_path, nrows=20, header=None)
-            header_idx = find_header_row(sample_df)
-            df = pd.read_excel(file_path, skiprows=header_idx)
+            df.columns = clean_column_names(df.columns)
+            df.to_sql(target_table, conn, index=False, if_exists='replace')
+            print(f"Sheet '{sheet_name}' import completed. Loaded {len(df)} rows.")
             
-        # Clean data: drop completely empty rows/cols
-        df.dropna(how='all', inplace=True)
-        df.dropna(axis=1, how='all', inplace=True)
-        
-        # Clean column names
-        df.columns = clean_column_names(df.columns)
-        
-        # Write to SQLite
-        df.to_sql(table_name, conn, index=False, if_exists='replace')
-        print(f"Excel import completed successfully. Loaded {len(df)} rows.")
-        
+            sheet_file_name = f"{file_name}::{sheet_name}" if len(sheets) > 1 else file_name
+            record_import(conn, sheet_file_name, target_table, file_md5)
+            imported_tables.append(target_table)
+            
     else:
         raise ValueError(f"Unsupported file format: {ext}")
         
-    # Record metadata
-    record_import(conn, file_name, table_name, file_md5)
-        
     conn.close()
-    return table_name
+    return imported_tables
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Import Excel/CSV to SQLite")
@@ -249,7 +316,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     try:
-        final_table = import_to_sqlite(args.input_file, args.db, args.table)
-        print(f"SUCCESS: Data imported into table '{final_table}'")
+        final_tables = import_to_sqlite(args.input_file, args.db, args.table)
+        if isinstance(final_tables, list):
+            print(f"SUCCESS: Data imported into tables: {', '.join(final_tables)}")
+        else:
+            print(f"SUCCESS: Data imported into table '{final_tables}'")
     except Exception as e:
         print(f"ERROR: {e}")
