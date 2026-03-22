@@ -12,6 +12,9 @@ workspace.db
 *.sqlite
 *.sqlite3
 
+# 忽略本地敏感配置文件
+config.txt
+
 # 忽略打包生成的 skill 产物
 *.skill
 
