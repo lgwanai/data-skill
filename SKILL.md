@@ -51,7 +51,7 @@ This skill transforms the agent into a powerful local data analysis assistant, s
 **Action**:
 1. Do NOT write custom Python scripts from scratch.
 2. We have a powerful template-based rendering engine. Use the built-in `scripts/chart_generator.py` script.
-3. First, identify the required chart type. Look into `references/prompts/` directory to find the corresponding Prompt skeleton for the exact chart type (e.g., `references/prompts/line/stacked_area.md`). Read the prompt to understand the data structure requirements.
+3. This skill provides **100% support for all ECharts v6.0 chart types**. First, identify the required chart type. Look into `references/prompts/` directory to find the corresponding Prompt skeleton for the exact chart type (e.g., `references/prompts/line/stacked_area.md`). Read the prompt to understand the data structure requirements.
 4. Formulate the SQL query that aggregates the data correctly according to the prompt's requirements.
 5. Generate the `custom_js` and `echarts_option` based on the prompt template.
 6. Construct a JSON configuration file (save it in `outputs/configs/`) matching this structure:
